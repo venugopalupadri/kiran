@@ -1,0 +1,128 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
+#include <ThingSpeak.h>
+
+// ==========================
+// WiFi Credentials
+// ==========================
+const char* ssid = "Net beeka";
+const char* password = "upadri257";
+
+// ==========================
+// Firebase Credentials
+// ==========================
+const char* firebaseHost = "iot-project-e6afc-default-rtdb.firebaseio.com";
+const char* firebaseAuth = "AIzaSyDbATI-02waDd4NWBSr8WLbyY2GYOQLMDs";
+const int firebasePort = 443;
+
+// ==========================
+// ThingSpeak Credentials
+// ==========================
+unsigned long channelID = 3020173;
+const char* writeAPIKey = "120VF5BHVND75JNU";
+
+// ==========================
+// Sensor Pin
+// ==========================
+const int tdsPin = A0;
+
+// ==========================
+// Clients
+// ==========================
+WiFiClient thingSpeakClient;
+WiFiClientSecure firebaseClient;
+WiFiServer server(80);
+
+float currentTDS = 0; // Global variable for TDS value
+
+// ==========================
+// Setup Function
+// ==========================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  pinMode(tdsPin, INPUT);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  firebaseClient.setInsecure();  // Disable cert verification (not safe for production)
+  ThingSpeak.begin(thingSpeakClient);
+  server.begin();  // Start the web server
+}
+
+// ==========================
+// Loop Function
+// ==========================
+void loop() {
+  // ======== 1. Read Sensor ========
+  int tdsValue = analogRead(tdsPin);
+  float voltage = tdsValue * 3.3 / 1024.0;
+  currentTDS = (133.42 * voltage * voltage * voltage
+                - 255.86 * voltage * voltage
+                + 857.39 * voltage) * 0.5;
+  Serial.print("TDS Value: ");
+  Serial.println(currentTDS);
+
+  // ======== 2. Send to Firebase ========
+  String tdsUrl = "/waterquality/tds.json?auth=" + String(firebaseAuth);
+  String tdsJson = "{\"tds\":" + String(currentTDS) + "}";
+  if (firebaseClient.connect(firebaseHost, firebasePort)) {
+    firebaseClient.print(String("PUT ") + tdsUrl + " HTTP/1.1\r\n" +
+                         "Host: " + firebaseHost + "\r\n" +
+                         "Content-Type: application/json\r\n" +
+                         "Content-Length: " + tdsJson.length() + "\r\n\r\n" +
+                         tdsJson);
+    delay(100);
+    firebaseClient.stop();
+    Serial.println("✅ Firebase updated.");
+  } else {
+    Serial.println("❌ Firebase connection failed.");
+  }
+
+  // ======== 3. Send to ThingSpeak ========
+  ThingSpeak.setField(1, currentTDS);
+  int response = ThingSpeak.writeFields(channelID, writeAPIKey);
+  if (response == 200) {
+    Serial.println("✅ ThingSpeak updated.");
+  } else {
+    Serial.print("❌ ThingSpeak error: ");
+    Serial.println(response);
+  }
+
+  // ======== 4. Serve Web Page Locally ========
+  WiFiClient client = server.available();
+  if (client) {
+    Serial.println("New web client connected.");
+    while (!client.available()) delay(1);
+
+    String req = client.readStringUntil('\r');
+    client.flush();
+
+    // HTML page content
+    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>TDS Monitor</title>";
+    html += "<style>body{font-family:Arial;text-align:center;background:#f5f5f5;padding:50px;}h1{color:#333;}div{font-size:24px;margin-top:20px;}</style>";
+    html += "</head><body><h1>Water Quality Monitor</h1><div><strong>TDS Value: </strong>";
+    html += String(currentTDS, 2) + " ppm</div></body></html>";
+
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html");
+    client.println("Connection: close");
+    client.println();
+    client.println(html);
+    delay(1);
+    client.stop();
+    Serial.println("Web client disconnected.");
+  }
+
+  delay(15000);  // ThingSpeak min delay
+}
